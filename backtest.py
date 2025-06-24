@@ -1,65 +1,93 @@
 # backtest.py
 import os
 import sys
+import queue
 
-# Import our new components and event system
-from event_system import MarketEvent, event_queue
-from engine_components import DataHandler
+from event_system import MarketEvent, SignalEvent, OrderEvent, FillEvent, event_queue
+from engine_components import DataHandler, Portfolio, LoggingHandler, ExecutionHandler
+from statistics import Statistics
+from strategies.buy_and_hold_strategy import BuyAndHoldStrategy
 
 def main():
-    """
-    Main function to run the backtesting engine.
-    """
     print("--- Terminal Backtesting Engine ---")
 
-    # --- Get a unique name for the test run ---
-    try:
-        run_name = input("Enter a unique name for this test run (e.g., sma_crossover_test_1): ")
-        if not run_name.strip():
-            print("\nError: Run name cannot be empty. Exiting.")
-            sys.exit(1)
-    except KeyboardInterrupt:
-        print("\n\nOperation cancelled by user. Exiting.")
-        sys.exit(0)
-
-    # --- Ensure output directories exist ---
-    os.makedirs('logs', exist_ok=True)
-    os.makedirs('results', exist_ok=True)
-
-    print(f"\nStarting new test run: '{run_name}'")
+    # --- Configuration ---
+    run_name = "phase3_advanced_plot"
+    symbol = 'RELIANCE.NS'
+    initial_capital = 100000.0
+    csv_filepath = os.path.join('data', 'stocks', f'{symbol}.csv')
+    commission_rate = 0.001
+    slippage_pct = 0.0005
     
-    #
-    # --- Phase 1.3: Data-Driven Event Loop ---
-    #
+    print(f"\nStarting new test run: '{run_name}' on {symbol}")
     
-    # 1. Initialize the DataHandler with our sample data file
-    #    In the future, this filepath will be dynamic.
-    data_handler = DataHandler(csv_filepath='data/RELIANCE.NS.csv')
+    # --- Initialization ---
+    data_handler = DataHandler(csv_filepath=csv_filepath)
+    portfolio = Portfolio(initial_capital=initial_capital)
+    execution_handler = ExecutionHandler(commission_rate=commission_rate, slippage_pct=slippage_pct)
+    strategy = BuyAndHoldStrategy(symbol=symbol, data_handler=data_handler)
+    logger = LoggingHandler(run_name=run_name)
 
-    # 2. The main event loop, now driven by the DataHandler
+    # --- Main Event Loop ---
     while True:
-        # Get the next bar of data. This also puts a MarketEvent on the queue.
         timestamp, bar_data = data_handler.stream_next_bar()
-        
-        # If the DataHandler returns None, the data stream has ended.
         if timestamp is None:
-            print("\n--- Backtest Finished: No more market data. ---")
             break
-
-        # Process events from the queue
         while not event_queue.empty():
             try:
-                event = event_queue.get()
+                event = event_queue.get(False)
             except queue.Empty:
                 break
             else:
-                if event and event.type == 'MARKET':
-                    # This is where we will trigger the strategy in the next step
-                    print(f"--- Processing Market Event for Timestamp: {timestamp.strftime('%Y-%m-%d')} ---")
-                    print(f"Data: Open={bar_data['Open']}, High={bar_data['High']}, Low={bar_data['Low']}, Close={bar_data['Close']}")
-                    # In the next step, we will pass this bar_data to our strategy.
+                if event:
+                    if event.type == 'MARKET':
+                        strategy.calculate_signals(timestamp, bar_data)
+                    elif event.type == 'SIGNAL':
+                        logger.on_signal(event)
+                        portfolio.on_signal(event)
+                    elif event.type == 'ORDER':
+                        execution_handler.execute_order(event, bar_data)
+                    elif event.type == 'FILL':
+                        portfolio.on_fill(event)
+                        logger.on_fill(event)
     
-    print(f"\nTest run '{run_name}' complete.")
+    print("\n--- Backtest Finished: Generating Report & Chart ---")
+
+    # --- Post-Backtest Analysis ---
+    stats = Statistics(
+        trades_log_path=logger.trade_log_path,
+        portfolio=portfolio,
+        data_handler=data_handler
+    )
+    report_data = stats.generate_report()
+    
+    # Print report
+    print("\n" + "="*50)
+    print(f"      PERFORMANCE REPORT for '{run_name}'")
+    print("="*50)
+    for key, value in report_data.items():
+        print(f"{key:<35} | {value}")
+    print("="*50)
+
+    # Save report to file
+    report_path = os.path.join('results', f'{run_name}_report.txt')
+    with open(report_path, 'w') as f:
+        for key, value in report_data.items():
+            f.write(f"{key}: {value}\n")
+    print(f"\nReport saved to {report_path}")
+
+    # --- NEW: Generate and save the single advanced chart ---
+    chart_path = os.path.join('results', f'{run_name}_analysis_chart.png')
+    stats.plot_advanced_charts(
+        output_path=chart_path, 
+        title=f"Performance Analysis for '{run_name}' on {symbol}"
+    )
+    interactive_chart_path = os.path.join('results', f'{run_name}_interactive_chart.html')
+    stats.plot_interactive_ohlc_chart(
+        output_path=interactive_chart_path,
+        title=f"Interactive Trade Chart for '{run_name}' on {symbol}"
+    )
+    print(f"Log files saved in the /logs directory.")
 
 if __name__ == "__main__":
     main()
